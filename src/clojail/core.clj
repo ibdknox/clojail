@@ -6,7 +6,9 @@
         [clojure.walk :only [walk postwalk-replace]]
         clojail.jvm)
   (:import (java.util.concurrent TimeoutException TimeUnit FutureTask)
-           (clojure.lang LispReader$ReaderException)))
+           (clojure.lang LispReader$ReaderException LineNumberingPushbackReader)
+           (java.io StringReader)
+           (clojure.lang Compiler)))
 
 ;; postwalk is like a magical recursive doall, to force lazy-seqs
 ;; within the timeout context; but since it doesn't maintain perfect
@@ -195,8 +197,43 @@
               *read-eval* false]
       (let [bindings (or bindings {})
             code `(do ~(make-dot tester-str)
-                      ~(ensafen code))]
+                     ~(ensafen code))]
         (with-bindings bindings (jvm-sandbox #(eval code) context))))))
+
+(defn- normal-evaluator [code tester tester-str context nspace bindings]
+  (if-let [problem (check-form code tester nspace)]
+    (security-exception problem)
+    (evaluator code tester-str context nspace bindings)))
+
+(defn- get-line [lrdr]
+  (Integer. (.getLineNumber lrdr)))
+
+(defn- secure-eval [form tester tester-str nspace context bindings]
+  (if-let [problem (check-form form tester nspace)]
+    (security-exception problem)
+    (binding [*ns* nspace]
+      (let [bindings (or bindings {})
+            code `(do ~(make-dot tester-str)
+                      ~(ensafen form))]
+        (with-bindings bindings (jvm-sandbox #(eval code) context))))))
+
+(defn- lined-evaluator [rdr tester tester-str context nspace bindings]
+  (let [EOF (Object.)]
+    (fn []
+      (binding [*read-eval* false
+                *ns* nspace]
+        (:result
+          (reduce (fn [ret form]
+                    (let [line (get-line rdr)]
+                      (with-bindings {clojure.lang.Compiler/LINE_AFTER line
+                                      clojure.lang.Compiler/LINE line
+                                      clojure.lang.Compiler/SOURCE "sandbox.clj"
+                                      clojure.lang.Compiler/SOURCE_PATH "sandbox.clj"
+                                      clojure.lang.Compiler/LINE_BEFORE (or (:prev-line ret) line)}
+                        {:result (secure-eval form tester tester-str nspace context bindings)
+                         :prev-line line})))
+                  {}
+                  (take-while #(not= % EOF) (repeatedly #(read rdr false EOF false)))))))))
 
 (defn set-security-manager
   "Sets the system security manager to whatever you pass. Passing nil is
@@ -251,17 +288,18 @@
     (let [init-defs (conj (user-defs nspace) 'dot)]
       (fn [code tester & [bindings]]
         (let [tester-str (read-tester tester)
-              old-defs (user-defs nspace)]
+              old-defs (user-defs nspace)
+              evaler (if (coll? code)
+                           normal-evaluator
+                           lined-evaluator)]
           (when jvm (set-security-manager (SecurityManager.)))
           (try
-            (if-let [problem (check-form code tester nspace)] 
-              (security-exception problem)
-              (thunk-timeout
-               (evaluator code tester-str context nspace bindings)
-               timeout
-               :ms
-               transform
-               (ThreadGroup. "sandbox")))
+            (thunk-timeout
+              (evaler code tester tester-str context nspace bindings)
+              timeout
+              :ms
+              transform
+              (ThreadGroup. "sandbox"))
             (finally (wipe-defs init-defs old-defs max-defs nspace))))))))
 
 (defn sandbox
@@ -300,3 +338,10 @@ IllegalStateException; other exceptions will be thrown unchanged."
   ([str]
      (with-in-str str
        (safe-read))))
+
+(defn lined-reader
+  "Create a line preserving reader for line-aware code evaluation in a sandbox."
+  [s]
+  (let [rdr (StringReader. s)]
+    (LineNumberingPushbackReader. rdr)))
+
