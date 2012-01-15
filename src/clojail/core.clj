@@ -88,7 +88,7 @@
        (and (seq? form) 
             (= 'quote (first form))))
     form
-    (walk macroexpand-most identity (macroexpand form))))
+    (with-meta (walk macroexpand-most identity (macroexpand form)) (meta form))))
 
 (defn- separate
   "Take a collection and break it and its contents apart until we have
@@ -117,14 +117,14 @@
   [form]
   (if-not (coll? form)
     form
-    (let [recurse #(walk dotify identity %)]
+    (let [recurse #(with-meta (walk dotify identity %) (meta %))]
       (if-not (seq? form)
         (recurse form)
         (let [f (first form)]
           (case f
                 quote form
-                . (cons 'dot (recurse (rest form)))
-                (recurse form)))))))
+                . (with-meta (cons 'dot (recurse (rest form)) (meta form)))
+            (recurse form)))))))
 
 ;; Compose our earlier functions.
 (def ^{:private true
@@ -224,9 +224,9 @@
                 *ns* nspace]
         (:result
           (reduce (fn [ret form]
-                    (let [line (get-line rdr)]
+                    (let [line (get-line rdr)
+                          cur-line (-> form meta :line)]
                       (with-bindings {clojure.lang.Compiler/LINE_AFTER line
-                                      clojure.lang.Compiler/LINE line
                                       clojure.lang.Compiler/SOURCE "sandbox.clj"
                                       clojure.lang.Compiler/SOURCE_PATH "sandbox.clj"
                                       clojure.lang.Compiler/LINE_BEFORE (or (:prev-line ret) line)}
