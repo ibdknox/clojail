@@ -123,7 +123,7 @@
         (let [f (first form)]
           (case f
                 quote form
-                . (with-meta (cons 'dot (recurse (rest form)) (meta form)))
+                . (with-meta (cons 'dot (recurse (rest form))) (meta form))
             (recurse form)))))))
 
 ;; Compose our earlier functions.
